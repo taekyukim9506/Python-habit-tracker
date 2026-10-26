@@ -3,9 +3,17 @@
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass
 
 from habit_tracker.habit import Habit
 
+@dataclass(frozen=True)
+class Completion:
+    """Represent one saved check-off with its database identifiers."""
+
+    completion_id: int
+    habit_id: int
+    completed_at: datetime
 
 class HabitRepository:
     """Manage database operations without handling user input.
