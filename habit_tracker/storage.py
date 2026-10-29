@@ -165,7 +165,113 @@ class HabitRepository:
 
             if cursor.rowcount == 0:
                 raise LookupError(f"Habit {habit_id} was not found.")
+            
+    def add_completion(
+        self,
+        habit_id: int,
+        completed_at: datetime | None = None,
+    ) -> Completion:
+        """Record a check-off for an existing habit.
 
+        Completion times must use local time and fall between the
+        habit's creation time and the current time. Repeated check-offs
+        are stored separately so individual mistakes can be undone.
+        """
+        habit = self.get_habit(habit_id)
+        current_time = datetime.now()
+
+        if completed_at is None:
+            completed_at = current_time
+
+        if not isinstance(completed_at, datetime):
+            raise TypeError("Completion time must be a datetime object.")
+
+        if completed_at.tzinfo is not None:
+            raise ValueError(
+                "Completion time must use local time without a timezone."
+            )
+
+        if completed_at < habit.created_at:
+            raise ValueError("Completion time cannot precede habit creation.")
+
+        if completed_at > current_time:
+            raise ValueError("Completion time cannot be in the future.")
+
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT INTO completions (habit_id, completed_at)
+                VALUES (?, ?)
+                """,
+                (
+                    habit_id,
+                    completed_at.isoformat(timespec="microseconds"),
+                ),
+            )
+
+            completion = Completion(
+                completion_id=cursor.lastrowid,
+                habit_id=habit_id,
+                completed_at=completed_at,
+            )
+
+        return completion
+
+    def list_completions(self, habit_id: int) -> list[Completion]:
+        """Return a habit's check-offs from oldest to newest.
+
+        The record ID provides a stable order when timestamps are equal.
+        A missing habit raises LookupError instead of appearing empty.
+        """
+        self.get_habit(habit_id)
+
+        rows = self._connection.execute(
+            """
+            SELECT completion_id, habit_id, completed_at
+            FROM completions
+            WHERE habit_id = ?
+            ORDER BY completed_at, completion_id
+            """,
+            (habit_id,),
+        ).fetchall()
+
+        return [
+            Completion(
+                completion_id=row["completion_id"],
+                habit_id=row["habit_id"],
+                completed_at=datetime.fromisoformat(row["completed_at"]),
+            )
+            for row in rows
+        ]
+
+    def delete_completion(self, habit_id: int, completion_id: int) -> None:
+        """Undo one check-off belonging to the selected habit."""
+        self.get_habit(habit_id)
+
+        if isinstance(completion_id, bool) or not isinstance(
+            completion_id, int
+        ):
+            raise TypeError("Completion ID must be an integer.")
+
+        if completion_id <= 0:
+            raise ValueError("Completion ID must be greater than zero.")
+
+        # Checking both IDs prevents deleting another habit's check-off.
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM completions
+                WHERE completion_id = ? AND habit_id = ?
+                """,
+                (completion_id, habit_id),
+            )
+
+            if cursor.rowcount == 0:
+                raise LookupError(
+                    f"Completion {completion_id} was not found "
+                    f"for habit {habit_id}."
+                )
+                
     def close(self) -> None:
         """Close the connection and release the database file."""
         self._connection.close()
