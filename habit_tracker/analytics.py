@@ -1,7 +1,8 @@
 """Provide pure functions for habit filtering and streak calculations."""
 
 from collections.abc import Iterable
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from habit_tracker.habit import Habit
 from habit_tracker.storage import Completion
@@ -180,3 +181,153 @@ def longest_streaks(
     )
 
     return sorted(winners, key=lambda result: result[0].habit_id)
+
+@dataclass(frozen=True)
+class AttentionSummary:
+    """Describe a habit's performance over eligible completed periods.
+
+    A completion rate of None means there are no eligible periods.
+    The interface can display this as "Insufficient data".
+    """
+
+    habit: Habit
+    eligible_periods: int
+    completed_periods: int
+    missed_periods: int
+    completion_rate: float | None
+
+
+def due_habits(
+    habits: Iterable[Habit],
+    completions: Iterable[Completion],
+    as_of: datetime,
+) -> list[Habit]:
+    """Return existing habits not completed in their current period.
+
+    Newly created habits are immediately due. Habits created after
+    the reference time are excluded. Results preserve input order.
+    """
+    _validate_reference_time(as_of)
+    records = tuple(completions)
+    result = []
+
+    for habit in habits:
+        if habit.created_at > as_of:
+            continue
+
+        completed = _completed_periods(habit, records, as_of)
+        current_period = _period_number(as_of, habit.periodicity)
+
+        if current_period not in completed:
+            result.append(habit)
+
+    return result
+
+
+def _period_start(timestamp: datetime, periodicity: str) -> datetime:
+    """Return midnight at the start of the containing day or week."""
+    midnight = timestamp.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    if periodicity == "weekly":
+        return midnight - timedelta(days=midnight.weekday())
+
+    return midnight
+
+
+def attention_summary(
+    habit: Habit,
+    completions: Iterable[Completion],
+    as_of: datetime,
+) -> AttentionSummary:
+    """Summarise the previous four completed Monday-to-Sunday weeks.
+
+    Daily habits have at most 28 eligible periods; weekly habits have
+    at most four. Periods before creation and a partial creation
+    period are excluded. The current calendar week is not assessed.
+    """
+    _validate_reference_time(as_of)
+
+    if habit.habit_id is None:
+        raise ValueError("Attention calculations require a saved habit.")
+
+    window_end = _period_start(as_of, "weekly")
+    window_start = window_end - timedelta(weeks=4)
+
+    period_length = timedelta(
+        days=1 if habit.periodicity == "daily" else 7
+    )
+    first_full_period = _period_start(
+        habit.created_at, habit.periodicity
+    )
+
+    # Only a habit created exactly at the boundary has a full first period.
+    if habit.created_at > first_full_period:
+        first_full_period += period_length
+
+    eligible_start = max(window_start, first_full_period)
+
+    if eligible_start >= window_end:
+        return AttentionSummary(
+            habit=habit,
+            eligible_periods=0,
+            completed_periods=0,
+            missed_periods=0,
+            completion_rate=None,
+        )
+
+    eligible_count = (window_end - eligible_start) // period_length
+
+    first_period = _period_number(eligible_start, habit.periodicity)
+    end_period = _period_number(window_end, habit.periodicity)
+    completed = _completed_periods(habit, completions, as_of)
+
+    # The upper boundary is exclusive: this week's records do not count.
+    completed_count = sum(
+        1 for period in completed
+        if first_period <= period < end_period
+    )
+
+    missed_count = eligible_count - completed_count
+    completion_rate = completed_count / eligible_count * 100
+
+    return AttentionSummary(
+        habit=habit,
+        eligible_periods=eligible_count,
+        completed_periods=completed_count,
+        missed_periods=missed_count,
+        completion_rate=completion_rate,
+    )
+
+
+def habits_needing_attention(
+    habits: Iterable[Habit],
+    completions: Iterable[Completion],
+    as_of: datetime,
+) -> list[AttentionSummary]:
+    """Return habits with missed eligible periods, lowest rate first.
+
+    Perfect histories and histories with insufficient data are
+    excluded. Equal completion rates are ordered by habit ID.
+    """
+    _validate_reference_time(as_of)
+    records = tuple(completions)
+
+    summaries = map(
+        lambda habit: attention_summary(habit, records, as_of),
+        habits,
+    )
+
+    needing_attention = filter(
+        lambda summary: summary.missed_periods > 0,
+        summaries,
+    )
+
+    return sorted(
+        needing_attention,
+        key=lambda summary: (
+            summary.completion_rate,
+            summary.habit.habit_id,
+        ),
+    )
